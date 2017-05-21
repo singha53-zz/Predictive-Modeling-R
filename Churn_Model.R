@@ -56,6 +56,8 @@ logistic.model <- glm(churn~total_day_charge+total_intl_calls+international_plan
 # summary of model
 summary(logistic.model)
 
+# we could use the trained logistic model to predict churn in the test data, but will isntead use a regularized gradient boosting model
+
 #-----------------------------------------------------------------------#
 
 # XGboost training model
