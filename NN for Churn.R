@@ -34,7 +34,7 @@ scaled.data <- as.data.frame(scale(churn[,6:20], center = mins, scale = maxs - m
 
 #---------------------------------------------------------------#
 
-# Convert Private column from Yes/No to 1/0
+# Convert churn column from Yes/No to 1/0
 churn.col <- as.numeric(churn$churn)-1
 data <- cbind(churn.col, scaled.data)
 
