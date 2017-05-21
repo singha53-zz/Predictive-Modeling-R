@@ -1,0 +1,305 @@
+---
+title: "Predictive Modeling for Customer Churn Analysis"
+author: "Paul Kostoff"
+date: "May 21, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Analyzing Churn
+
+This is a demonstration of customer churn/retention analysis using R and machine learning algorithms. 
+
+A word on Churn Modeling:
+The purpose of the model is to automate and predict which customers are dissatisfied or at risk of turning over so that the company can reach out sooner and retain loyalty. Due to the cost of retaining an existing customer being less than the cost of acquiring a new customer, the model can quickly pay for itself. The model will draw correlations across the various attributes to identify which attributes are highly correlated to customer churn which is visualized at the end of the document in the 'feature importance' section. The purpose is to provide a base prediction so that firms can target those at risk of dropping service in a cost effective manner. 
+
+To get started, let's load the libraries we will use to perform this analysis. Note that the package xgboost loads a regularized gradient boosted ensemble algorithm, known for its high predictive accuracy. 
+
+```{r churn}
+library(xgboost)
+library(qlcMatrix)
+library(data.table)
+library(ggplot2)
+library(DiagrammeR)
+library(leaps)
+```
+
+
+## Loading and analyzing training data set
+
+The model will be built using a training data set, and then tested using a new blind data set to gauge its predictive accuracy. The idea is that its performance on a test data set is a proxy for its performance on future customer data. 
+
+First, let's load the telecom churn data which we have saved locally in .csv files. The churnTrain and churntest data sets are also available in the C50 package within R. 
+
+```{r load data}
+churnTrain <- read.csv("D:\\Users\\US52577\\Desktop\\Churn Files\\Data for Models\\R Data\\churnTrain.csv", header = TRUE, strip.white = TRUE)
+churnTest <- read.csv("D:\\Users\\US52577\\Desktop\\Churn Files\\Data for Models\\R Data\\churnTest.csv", header = TRUE, strip.white = TRUE)
+table(churnTrain$churn)
+
+# graphical representation of customer breakdown
+graph <- ggplot(churnTrain, aes(x=churn, fill = ..count.., col = "red")) + geom_bar()
+graph <- graph + ylab("Number of Customers") + xlab("Customer Churn") + labs(title = "Breakdown of Customers by Churn")
+graph
+```
+
+* From the churn training data set, we see that 483 out of 3333 customers dropped the telecom service.
+
+## Feauture Selection
+
+Not all variables within the data set will be equally important in predicting customer churn. In this section, we use the forward stepwise function to determine which variables out of the 19 possible categories are most useful in predicting customer churn.
+
+```{r selection}
+# create feature selection dataset and drop state and area code
+data.select <- churnTrain
+data.select$state <- NULL
+data.select$area_code <- NULL
+data.select$churn <- ifelse(data.select$churn == "yes", 1, 0)
+data.select$churn <- as.factor(data.select$churn)
+
+# forward stepwise 
+regfit.fwd <- regsubsets(churn~. ,data = data.select, nvmax = 15 ,method = "forward")
+
+# model selection criteria 
+regsummary.fwd <- summary(regfit.fwd)
+which.min(regsummary.fwd$cp) # evidence that 8 variable model is best 
+
+# best model as determined by CP
+names(coef(regfit.fwd, 8))
+```
+* Marlows's CP is the fit selection criterion used to select the 'best' model with respect to classifying churn. With Marlows's CP, we look to minimize the value. In this case, the forward stepwise function found that the 8 variable model minimized CP. The names of most relevant variables are found above. 
+
+## Logistic Regression for Feauture Specific Effects
+
+In order to determine the individuals effects on churn probability, we can run a logistic regression using the selected features from the forward stepwise function. 
+
+```{r logistic}
+# build logistic classification model
+logistic.model <- glm(churn~total_day_charge+total_intl_calls+international_plan+total_eve_minutes+
+                      total_intl_charge+voice_mail_plan+total_night_charge+number_customer_service_calls,
+                      data = data.select, family = "binomial")
+
+# summary of model
+summary(logistic.model)
+```
+* We see that each of the included variables is significant at the 1% level. The logistic regression coefficients give the change in the log probability of the outcome for 
+a one unit increase in the predictor variable. For example, for every one unit change in total international calls, the log probability of custmer churn decreases by -.938. 
+
+
+## Pre-process training data and building model
+
+We could have used the logistic model built on the training data to predict customer churn in the test data. However, we will instead use a regularized gradient boosting model which has been shown to perform well in classification tasks relative to other algorithms when tuned properly. 
+
+During the model building phase, the xgboost algorithm 'learns' nuances in customer behavior from the training data set. 
+
+```{r build model}
+# drop state column
+churnTrain$state <- NULL
+
+# transform to sparse matrix
+sparse_matrix <- sparse.model.matrix(churn ~ .-1, data = churnTrain)
+
+# setting output vector
+churnTrain$outputVector = 0
+churnTrain$outputVector[churnTrain$churn == "yes"] = 1
+outputVector <- churnTrain[, "outputVector"]
+
+# building model
+bst <- xgboost(data = sparse_matrix, label = outputVector, max.depth = 10,
+               eta = 1, nthread = 2, nround = 5, objective = "binary:logistic")
+```
+* We see that the trained model produces an exceptional error rate of 1.2% by the fifth round of training. This means that the model accurately classified nearly 99% of customers with respect to whether or not they would drop this particular telecom company's services. This is phenomenal accuracy, however, the real benchmark for an effective model is how it performs on new data. 
+
+
+## Using trained model to predict test data
+
+We will now test our model on a new dataset to gauge its predictive accuracy, which is a strong proxy for how it will perform on future observations, and displays how this model should be implemented with future observations.
+
+```{r test model}
+# drop state from test set
+churnTest$state <- NULL
+
+# saving test label
+testLabel <- churnTest$churn
+
+# transforming test to sparse
+sparse_test_matrix <- sparse.model.matrix(churn~.-1, data=churnTest)
+
+# grab label outcome for test vector
+churnTest$outputVector = 0
+churnTest$outputVector[churnTest$churn == "yes"] = 1
+outputTestVector <- churnTest[, "outputVector"]
+
+# making prediction on test data
+pred <- predict(bst, sparse_test_matrix)
+
+# changing prediction to binary
+prediction <- as.numeric(pred > 0.5)
+
+# determine average model error
+err <- mean(as.numeric(pred > 0.5) != outputTestVector)
+print(paste("test-error =", err))
+```
+* With an error rate of only ~ 5% when tested on the test data set, the regularized gradient boosted model proved 95% accurate with respect to predicting whether customers in the test data set would retain or drop the telecom service. This is exceptional accuracy. 
+
+
+## Transforming data into packaged spreadsheet output
+
+```{r report}
+# adding in columns for final dataset export
+model.probabilities <- data.frame(pred)
+model.predictions <- data.frame(prediction)
+model.predictions$prediction <- ifelse(model.predictions == 1, "yes", "no")
+xgb.final <- cbind(churnTest, model.predictions, model.probabilities)
+xgb.final$outputVector <- NULL
+xgb.final$churn <- as.character(xgb.final$churn)
+xgb.final$matching.prediction <- ifelse(xgb.final$churn == xgb.final$prediction, "match", 
+"no match")
+
+# prediction breakdown
+xgb.final$predict_breakdown <- ifelse(xgb.final$churn == "yes" & xgb.final$prediction == "yes", "True Positive", ifelse(xgb.final$churn == "yes" & xgb.final$prediction == "no", 
+"False Negative", ifelse(xgb.final$churn == "no" & xgb.final$prediction == "no", "True Negative", "False Positive")))
+
+# rename columns
+setnames(xgb.final, old = c("prediction", "pred", "matching.prediction", "predict_breakdown"), 
+         new = c("xgb model prediction", "xgb model probability of churn", "matching prediction", "prediction breakdown"))
+
+# order columns
+xgb.final <- xgb.final[,c(19,20,22,23,21,1:18)]
+
+# DF for header display
+head.df <- xgb.final[,c("churn","xgb model prediction", "matching prediction", "prediction breakdown", "xgb model probability of churn")]
+
+setnames(head.df, old = c("xgb model prediction", "matching prediction", "prediction breakdown", "xgb model probability of churn"),
+         new = c("model pred", "match", "breakdown", "model prob"))
+
+head(head.df)
+```
+* Here we see the results of the first five observations, each of which are accurately predicted by the trained model to be retained as customers. Note that the final column is the probability that each customer will drop the service. Given that the probability that each of these first five customers will drop the service is below .5, they were each predicted to be retained. 
+
+
+## Granular Analysis (churn vs retention)
+
+We know that the total model accuracy is 95%. However, let's look at the accuracy with respect to correctly predicting customers who will turn over vs customers who will be retained by the telecom company. We can do this by writing a few functions based off the prediction breakdown column specifies model predictions as true positives, true negatives, false positives, or false negatives. 
+
+```{r churn_gran}
+# breakdown of accurate churn and retention
+
+# set total churn 
+churn.number <- sum(xgb.final$churn=="yes")
+churn.pred.correct <- sum(xgb.final$`prediction breakdown`=="True Positive")
+
+# xgboost model correctly predicted 
+identify.churn <- function(churn.number, churn.pred.correct){
+  
+  churn.accuracy.rate <<- churn.pred.correct / churn.number
+  
+  print(sprintf("the model accuracy with respect to accurately predicted churn is %f", churn.accuracy.rate))
+  
+}
+
+# run function on data
+identify.churn(churn.number, churn.pred.correct)
+```
+* The model correctly predicted over 70% of customers who dropped the service. 
+
+
+```{r retention_gran}
+# function for retention accuracy
+non.churn <- sum(xgb.final$churn=="no")
+non.churn.pred <- sum(xgb.final$`prediction breakdown`=="True Negative")
+
+# xgboost model correctly predicted 
+identify.retention <- function(non.churn, non.churn.pred){
+  
+  retention.accuracy.rate <- non.churn.pred / non.churn
+  
+  print(sprintf("the model accuracy with respect to accurately predicted retention is %f", retention.accuracy.rate))
+  
+}
+
+# run function on data
+identify.retention(non.churn, non.churn.pred)
+```
+* The model is over 98% accurate with respect to predicting cusomters who retained the service. 
+
+```{r graphical Rep}
+# visualizing relative accuracy rates
+accuracy.data <- data.frame(`Churn Category` = c("Retained", "Not Retained"), 
+                            `Predictive Accuracy` = c(.99, .71))
+
+accuracy.data$Churn.Category <- as.character(accuracy.data$Churn.Category)
+accuracy.graph <- ggplot(accuracy.data, aes(x=Churn.Category, y=Predictive.Accuracy, fill = Churn.Category)) + geom_bar(stat = "identity")
+accuracy.graph <- accuracy.graph + ylab("Predictive Accuracy") + xlab("Customer Class") + labs(title = "Predictive Accuracy with Resepct to Customer Class")
+accuracy.graph
+```
+
+If we wanted to cast a wider net with respect to capturing customers who will turn over, we may adjust the model by lowering the threshold for 'churn probability' which is currently set at .5. Lowering the threshold to .4, for example, would ensure that we capture more of the customers expected to turn over. This would lead to a higher false positive rate, and lower overall model accuracy, but that may be preferable if our primary goal is simply to identify those customers expected to turn over. 
+
+
+## Feature Importance
+
+We can also identify which variables are most important with respect to predicting customer churn and retention. 
+
+```{r importance}
+# generating importance matrix
+importance_matrix <-  xgb.importance(feature_names = sparse_matrix@Dimnames[[2]], model = bst)
+head(importance_matrix)
+
+# generating plot that shows importance
+xgb.ggplot.importance(importance_matrix = importance_matrix)
+```
+
+* As we see, the gradient boosted model found total day minutes by far the most important variable for predicting churn and retention. Next in line are total evening minutes and number of customer service calls. 
+
+
+## Using 10-fold CV to Validate Results
+
+Using a 2/3 vs 1/3 train and test split, we recorded a model accuracy of about 95%. Now, let's validate that accuracy rate using 10 fold cross validation. 
+
+```{r CV}
+# validate results with CV
+bst.CV <- xgb.cv(data = sparse_matrix, label = outputVector, max.depth = c(15),
+                 eta = 1, nthread = 2, nround = 5, nfold = 10, objective = "binary:logistic",
+                 prediction = TRUE)
+```
+* 10-fold CV repeated for 5 rounds returns error rates consistent with the 5% error rate produced by the train/test split. 
+
+
+## Predicting New Customers
+
+The code below creates two hypothetical customers to the telecom firm. We then use the best version of the xgboost model to predict whether they will drop the service. 
+
+```{r newcust}
+# predict new customer using best trained model
+new.customer <- data.frame(account_length = c(100, 98), area_code = c("area_code_415", "area_code_408"), international_plan = c("yes", "no"), voice_mail_plan = c("yes", "no"), 
+  number_vmail_messages = c(20, 25), total_day_minutes=c(200, 195), total_day_calls=c(100, 95), total_day_charge=c(40, 45),
+  total_eve_minutes=c(200, 180), total_eve_calls=c(100, 90), total_eve_charge=c(20, 25), total_night_minutes=c(200, 190),
+  total_night_calls=c(100, 80), total_night_charge=c(10, 8), total_intl_minutes=c(15, 10), total_intl_calls=c(3, 2),
+  total_intl_charge=c(3, 1), number_customer_service_calls=c(2, 5))
+
+# sparse matrix conversion
+sparse_matrix_pred <- sparse.model.matrix(~.-1, data=new.customer)
+
+# making prediction
+pred_new_data <- predict(bst, sparse_matrix_pred)
+
+# changing prediction to binary
+prediction_pred <- as.numeric(pred_new_data > 0.5)
+
+# creating data.frame for new predictions
+final_results <- data.frame(new.customer, prediction_pred, pred_new_data)
+final_results$prediction_pred <- ifelse(prediction_pred==0, "no", "yes")
+final_results$pred_new_data
+final_results$prediction_pred
+```
+* Given the new customers input data, the model predicts that neither of the prospective customers will drop the service, with respective probabilities of 0.09 and .2. This can be applied to n new customers for a granular view of operations and accurate prediction of customer churn.
+
+
+## Next Steps
+
+This model has now been validated and used to predict new prospective customers. With expected accuracy of ~ 95%, the model is ready for production use. As we gain data, the model should be retrained in order to boost its predictive accuracy even further.
+
