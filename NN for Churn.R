@@ -9,7 +9,7 @@ library(caret)
 
 # load data
 
-# read in csv files
+# read in csv files - I'm reading in the churn .csv files from a local directory
 churnTrain <- read.csv("D:\\Users\\US52577\\Desktop\\Churn Files\\Data for Models\\R Data\\churnTrain.csv", header = TRUE, strip.white = TRUE)
 churnTest <- read.csv("D:\\Users\\US52577\\Desktop\\Churn Files\\Data for Models\\R Data\\churnTest.csv", header = TRUE, strip.white = TRUE)
 
