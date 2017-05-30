@@ -1,0 +1,541 @@
+---
+title: "Employee Requirement Forecasting"
+author: Paul Kostoff
+date: May 29, 2017
+output:
+  md_document:
+    variant: markdown_github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+## Analyzing Trends in Employee Requirement - (FTE in the R Code which stands for Full Time Employee)
+The purpose of this report is to analyze trends in Employee Requirement. Essentially, we have time entry for a firm from each of its employees on a daily basis. We want to determine how this time entry allows us to forecast the number of employees the firm needs to adequately complete its business processes without overworking its employees. Building accurate forecasts allows firms a better sense of their business operations and the ability to accurately plan for the future. We use a number of methods for time series analysis in R to do this. The packages tseries, forecast, and AnomalyDetection are all helpful with time series analysis and are used extensively in this demonstration. 
+
+```{r libraries, include=FALSE}
+library(AnomalyDetection)
+library(ggplot2)
+library(Rcpp)
+library(timeDate)
+library(data.table)
+library(tseries)
+library(lubridate)
+library(forecast)
+library(forecastxgb)
+library(caret)
+library(qlcMatrix)
+library(xgboost)
+```
+
+
+```{r load, echo=FALSE}
+
+# load data
+series <- read.csv("Time Series.csv", header = TRUE, strip.white = TRUE) 
+series$EventDate <- as.character(series$EventDate)
+series$EventDate <- mdy(series$EventDate)
+setnames(series, old = c("FTE.per.Day"), new = c("FTE Requirement"))
+
+#----------------------------------------------#
+
+# creating dates vector
+dates <- seq(as.Date("2016-04-01", format="%Y-%m-%d"), as.Date("2017-03-31", format="%Y-%m-%d"),"days")
+
+# isolate weekdays
+weekdays.dates <- dates[ ! weekdays(dates) %in% c("Saturday", "Sunday")]  
+dates <- data.frame(as.character(weekdays.dates))
+setnames(dates, old = c("as.character.weekdays.dates."), new = "Date")
+
+# convert Event Date column for merge
+series$EventDate <- as.character(series$EventDate)
+setnames(series, old = c("EventDate"), new = "Date")
+
+# merge for weekday only view
+weekdays <- merge(series, dates, by = c("Date"), all.y = TRUE)
+series.weekdays <- series
+series.weekdays <- na.omit(weekdays)
+
+# convert date field to date
+series.weekdays$Date <- as.Date(series.weekdays$Date)
+```
+
+
+## Plotting Employee Requirement using Weekdays only
+
+Employees entered very little time on the weekends, as we would expect. 2016-04-02 and 2016-04-03 were the first Saturday and Sunday in April 2016. As you will see later, the inclusion of weekends into the graph create consistent troughs.
+
+```{r head}
+# view head of series data
+head(series)
+```
+
+In the graph below, we exclude weekends from the data, along with significant outliers, which we observe around Holidays. We include a trend line in the graph below. 
+
+```{r viz1}
+# visualzie trend in FTE Requirement per day
+ggplot(series.weekdays, aes(x=Date, y=`FTE Requirement`, color=`FTE Requirement`)) + geom_line() + geom_smooth(method = "lm")+ylab('FTE Requirement')
+
+# convert date for anomaly detection
+series.weekdays$Date <- as.POSIXct(series.weekdays$Date)
+#![plot](./Time%20Series/Time%20Series%20Graphs/viz1-1.png)
+#![plot](ARIMA_Forecasting_files/figure-markdown_github/viz1-1.png)
+
+```
+
+We still observe troughs in the graph in association with Holidays. Nevertheless, the general trend shows an increase in Employee Requirement over the last year given the amount of work the employees of the firm were completing. 
+
+
+## Applying Anomaly Detection to FTE Requirement per Weekday
+
+We next apply anomaly detection to determine whether any of the significant troughs visible in the data represent anomalies. 
+
+```{r viz2}
+# create anomaly detection subset
+data.anomaly <- series.weekdays[,c("Date","FTE Requirement")]
+
+# Apply anomaly detection
+data_anomaly <- AnomalyDetectionTs(data.anomaly, max_anoms=0.01, direction="both", 
+                                   plot=TRUE, e_value = T)
+
+# visualize anomalies
+data_anomaly$plot
+```
+
+Anomaly detection considered only two points to be anomalies, meaning that less than 1% of total observations are classified as anomalous after excluding weekends. 
+
+
+## Analyzing Trends while keeping all observations
+
+While excluding weekends from the data helps eliminate many of the toughs we observe, we still have the question of what to do with the time entered on the weekends. Though little in comparison to time entered on weekdays, it still represents thousands of minutes which should be included, if possible, in the analysis. Below we graph the entire set of 365 days in the data, including weekends. 
+
+```{r viz3}
+# forecasting using all observations
+
+# plot all observations
+series$Date <- as.Date(series$Date)
+ggplot(series, aes(x=Date, y=`FTE Requirement`, color=`FTE Requirement`)) + geom_line() + geom_smooth(method = "lm")+ylab('FTE Requirement')
+# it appears little time is being entered on the weekends
+
+# drop outliers in terms of FTE Requirement
+series.weekdays <- series.weekdays[!(series.weekdays$`FTE Requirement` < 5),]
+
+# create time series object 
+count_ts <- ts(series.weekdays[, c('FTE Requirement')])
+series.weekdays$clean_cnt <- tsclean(count_ts)
+# in this case, the cleaned FTE Requirement count did not remove outliers
+```
+
+As we see, time entry follows a relatively predictable series of peaks during mid week, and troughs on the weekends. 
+
+
+## Auto Regressive Integrated Moving Average (ARIMA)
+
+Neither keeping nor removing weekends is perfectly ideal for time series analysis, as excluding weekends leads to a loss of time entered and keeping them leads to high fluctuation which proves difficult to model. A way around modeling or excluding the troughs posed by the weekend Employee Requirement values is to use a moving weekly or monthly average with respect to Employee REquirement. Moving averages are calculated using auto regressive integration (which is less complex than it might sound). Below you will find graphs of the weekly and monthly moving averages on top of the total sets of observations, and then graphed alone. 
+
+Ultimately, the predictions we generated when including weekends in the analysis negatively impacted the Employee Requirement predictions. The predictions returned were far lower than we could reasonably expect, given they were being pulled downwards by the low weekend Employee Requirement values. This being the case, we exclude weekends when calculating the weekly and monthly moving averages. 
+
+```{r viz4, warning=FALSE, message=FALSE}
+# adding ARIMA (auto-regressive integrated moving average)
+
+# calculating weekly and monthly averages
+series.weekdays$cnt_ma <- ma(series.weekdays$clean_cnt, order=7) # using the clean count with no outliers
+series.weekdays$cnt_ma30 <- ma(series.weekdays$clean_cnt, order=30)
+mean(series.weekdays$cnt_ma, na.rm = TRUE)
+
+# plotting with weekly and monthly averages included
+ggplot() +
+  geom_line(data = series.weekdays, aes(x = Date, y = clean_cnt, colour = "Counts")) +
+  geom_line(data = series.weekdays, aes(x = Date, y = cnt_ma,   colour = "Weekly Moving Average"))  +
+  geom_line(data = series.weekdays, aes(x = Date, y = cnt_ma30, colour = "Monthly Moving Average"))  +
+  ylab('FTE Requirement')
+
+# plotting weekly and monthly averages
+ggplot() +
+  geom_line(data = series.weekdays, aes(x = Date, y = cnt_ma,   colour = "Weekly Moving Average"))  +
+  geom_line(data = series.weekdays, aes(x = Date, y = cnt_ma30, colour = "Monthly Moving Average"))  +
+  ylab('FTE Requirement')
+```
+
+
+## Trend Breakdown
+
+Using the weekly moving average, we can observe trends which appear in the Employee Requirement over time. We do just this in the plot below, which looks at overall trends in the series, seasonal fluctuations, and variation which is unexplained by either the seasonal or general trends. 
+
+```{r viz5}
+# decomposition using weekly moving average
+count_ma <- ts(na.omit(series.weekdays$cnt_ma), frequency=30)
+count_ma30 <- ts(na.omit(series.weekdays$cnt_ma30), frequency=30)
+decomp <- stl(count_ma30, s.window="periodic")
+decomp.week <- stl(count_ma, s.window="periodic")
+deseasonal_cnt.week <- seasadj(decomp.week)
+deseasonal_cnt <- seasadj(decomp)
+plot(decomp, main='Trends') # the remainder cannot be explained through either seasonal or trend components
+```
+
+As we see from the trend portion of the seasonal breakdown, the analysis shows a significant increase in average Employee Requirement using monthly average from around 725 to around 900. The increase in Employee Requirement is not uniformly distributed, which may suggest a custom step function is appropriate for forecasting. 
+
+
+## Statistical Testing for Stationarity and Auto-Correlation
+
+We next test to determine whether the series demonstrates stationarity, which is to say, the series retains mean, variance, and auto-correlation over time. 
+
+```{r viz6, warning=FALSE, message=FALSE}
+# statistical testing
+
+# testing whether data display stationarity
+adf.test(count_ma30, alternative = "stationary", k=12) # evidence at the 1% level
+
+# auto correlation testing
+Acf(count_ma30, main='')
+Pacf(count_ma30, main='')
+
+# dickey-fuller test on differenced data
+#count_d1 <- diff(deseasonal_cnt, differences = 1)
+#plot(count_d1, ylab = 'Count', xlab='Number of Months', main='Differenced Results')
+#adf.test(count_d1, alternative = "stationary") # evidence to support alternative hypothesis 
+
+# differenced ACF and PACF
+#Acf(count_d1, main='ACF for Differenced Series')
+#Pacf(count_d1, main='PACF for Differenced Series')
+
+# examine coefficients
+#auto.arima(deseasonal_cnt, seasonal=FALSE)
+```
+
+The statistical results align with what we observe in the data. We cannot reject non-stationarity, which is reasonable given the generally increasing trend we observe in Employee Requirement. We would not expect mean, variance, and auto-correlation to remain unchanged over time. We also observe sinasoidal patterns in auto-correlation and partial auto-correlation, which again match with the observed patterns in the monthly moving average for Employee Requirement. 
+
+
+## Forecasting
+
+We now examine different forecasting techniques for predicting future Employee Requirement using moving monthly averages. The first forecast below uses exponential smoothing. 
+
+```{r viz7}
+# fit first model
+fit.1 <- arima(deseasonal_cnt, order=c(1,1,7))
+fcast.1 <- forecast(fit.1, 30) # fit.1 estimates
+plot(fcast.1, main='Initial Forecast', ylab='FTE Requirement', xlab='Number of Months')  
+```
+
+The initial forecast converges on a monthly moving average of 858 Employee Requirement. This seems to be a suboptimal prediction given that the trend in Employee Requirement is generally increasing. The smoothing technique negated the upward trend. We can correct this by allowing for 'drift.' 
+
+```{r viz8}
+# allow for drift
+fit.3 <- Arima(deseasonal_cnt, order=c(0, 1, 1), include.drift = TRUE)
+fcast.3 <- forecast(fit.3, 30)
+plot(fcast.3, main='Forcast with Drift', ylab='FTE Requirement', xlab='Number of Months')
+```
+
+As seen, including drift allows the forecast to display an increasing trend. In this case, the forecast looks to be increasing at a linear rate. We next examine the drift forecast's performance when measured against the observed FTE Requirement over the final 21 days present in the data while using weekly moving average. 
+
+```{r viz9}
+# forecast vs actuals allowing for drift
+hold <- window(ts(deseasonal_cnt.week), start=230)
+fit_no_holdout <- Arima(ts(deseasonal_cnt.week[-c(230:258)]), order=c(0,1,1), include.drift = TRUE)
+fcast_no_holdout <- forecast(fit_no_holdout, h=28)
+plot(fcast_no_holdout, main="Predictions vs. Actuals", xlab='Number of Days', ylab='FTE Requirement')
+lines(ts(deseasonal_cnt.week))
+```
+
+The forecast performs well over the final 21 days with repsect to predicting Employee Requirement. Using the predictions of the drift model is one option for predicting future Employee Requirement. Another would be to build custom step functions. Under either scenario, we can move from orders due to new customers  to Employee requirement. For a simple example, see below:
+
+orders: o(c) = 5c, where c = additional customers
+
+Employee Requirement: e(o) = .001(o) + 600, where o = additional orders
+
+To move from new customers to Employee Requirement we can model:
+
+e(o(c)) = .001(5c) + 600, or -> e(o(c)) = .005c + 600
+
+For each additional customer, Employee requirement will increase by .005. 
+
+## Regression Analysis 
+
+We next use regression analyis to model predictions for future Employee Requirement. We will use linear, polynomial, and non-parametric models. Each of the models basically consider Employee Requirement to be a function of time. The weekly Employee Requirement trend data is used in the graph below, with the model results listed for review above the graph. 
+
+```{r viz10}
+# regression analysis
+
+# add days passed column 
+series.weekdays$Days <- seq.int(nrow(series.weekdays))
+setnames(series.weekdays, old = c("FTE Requirement"), new = c("FTE.Requirement"))
+
+# reg days on number of events
+lm.fit <- lm(FTE.Requirement~Days, data = series.weekdays)
+summary(lm.fit)
+
+# ggplot function to visualize regression
+ggplotRegression <- function (fit) {
+  
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+    geom_point() +
+    stat_smooth(method = "lm", col = "red") +
+    labs(title = paste("Adj R2 = ",signif(summary(fit)$adj.r.squared, 5),
+                       "Intercept =",signif(fit$coef[[1]],5 ),
+                       " Slope =",signif(fit$coef[[2]], 5),
+                       " P =",signif(summary(fit)$coef[2,4], 5)))+ylab("FTE Requirement")+ xlab("Days")
+}
+
+# plotting regression in ggplot
+ggplotRegression(lm.fit)
+```
+
+The model equation is: Employee Requirement = 658 + .69(Days). This gives the predicted Employee Requirement N days (excluding weekends) after April 1. For example, the predicted FTE Requirement 100 weekdays after April 1, 2016 is calculated as:
+658 + .69(100) = 728. 
+A second option is to use the monthly moving average. The monthly moving average reveals a sinasoid like trend not visible in the weekly moving average. The regression results and graph are displayed below:
+
+```{r viz11}
+
+# create monthly data set
+series.monthly <- series.weekdays[,c("Date","cnt_ma30")]
+series.monthly <- na.omit(series.monthly)
+series.monthly$Days <- seq.int(nrow(series.monthly))
+setnames(series.monthly, old = c("cnt_ma30"), new = c("ARIMA"))
+
+# biuld bi-variate regression
+lm.fit.2 <- lm(ARIMA~Days, data = series.monthly)
+summary(lm.fit.2)
+ggplotRegression(lm.fit.2)
+```
+
+The model equation is: 667 + .66(Days). So, 100 weekdays after April 1, 2016, the predicted FTE Requirement is: 667 + .66(100) = 733. The two predictions are only 5 FTE apart. We can solve the system of equations to determine when they would be equal, or in other words, match their predictions with respect to FTE Requirement:
+
+667 + .66D = 658 + .69D:
+9 = .03D
+300 = D, so the two predictions would be equal 300 weekdays after April 1, 2016. Predictions going out longer than this would be unlikely without remodeling the relationship to account for additional data. 
+
+We can also include polynomial terms to determine whether polynomial regression helps better predict than simple linear regression. 
+
+```{r viz12}
+# adding polynomial term
+lm.fit.3 <- lm(ARIMA~poly(Days, 4), data = series.monthly)
+summary(lm.fit.3)
+
+# plotting the polynomial graph
+ggplot(series.monthly, aes(x=Days, y=ARIMA)) + geom_point() + geom_smooth(span=.3) + ggtitle('Polynomial Fit')+ylab("FTE Requirement")
+```
+
+The high order polynomial term does in fact model the data quite closely, and of course reduces the error in comparison to the linear regression on the training data. However, the polynomial terms quickly yeild far higher predictions than can reasonably be expected. This becomes more pronounced the farther into the future we model. Below we compare estimates for 250, 300, and 350 days beyond betewen the linear and polynomial models:
+
+```{r estimates}
+# using models to predict future FTE Requirement
+new.data <- data.frame(Days = c(250, 300, 350))
+
+# predictions
+predict(lm.fit.2, newdata = new.data) # prefered predictions 
+predict(lm.fit.3, newdata = new.data) # predictions are over fit
+```
+
+The linear predictions are seen on top with the polynomial predictions below. As you see, the polynomial model's predictions begin to increase exponentially and are therefore of limited use as we predict out further and further. 
+
+
+## Non-Parametric Methods
+
+We will lastly consider two versions of regularized gradient boosting for predicting Employee Requirement. Regularized gradient boosting is known for its exceptional acuracy. However, the algorithm typically performs best with multi-dimensional data. In our context, using only time and FTE Requirement, it is unclear whether 'xgboost' will pick up on trends. See the first iteration of the xgboost model below:
+
+```{r viz13}
+
+# XGB Forecasting
+xgb.monthly <- series.monthly[,c("ARIMA", "Days")]
+ARIMA.xgb <- ts(series.weekdays$FTE.Requirement)
+xgb.fit <- xgbar(ARIMA.xgb)
+#summary(xgb.fit)
+xgb.forecast <- forecast(xgb.fit, h = 30)
+plot(xgb.forecast, main = 'XGB Weekly Moving Average Forecast') # far more sensative to fluctuations in the data, but does not 
+```
+
+The predictions are seen in blue, and extend 30 weekdays past the ending date of the observed data. The model is unable to pick up on the generally increasing trend in FTE Requirement. This is noted in the graph below which projects out the xgboost model 100 weekedays using the monthly moving average. 
+
+```{r viz14}
+
+# XGB Forecasting
+xgb.monthly <- series.monthly[,c("ARIMA", "Days")]
+ARIMA.xgb <- ts(series.monthly$ARIMA)
+xgb.fit <- xgbar(ARIMA.xgb)
+#summary(xgb.fit)
+xgb.forecast <- forecast(xgb.fit, h = 100)
+plot(xgb.forecast, main = 'XGB Monthly Moving Average Forecast') # far more sensative to fluctuations in the data, but does not 
+```
+
+The xgboost model is unable to accurately account for the general pattern of increase in FTE Requirement. The next option is to train and test an xgboost model in the regression context, and then use the trained model to predict future points. 
+```{r viz15}
+
+# set seed
+set.seed(101)
+
+# splitting training set into train and test with a 70/30% split
+
+trainIndex <- createDataPartition(xgb.monthly$ARIMA,
+                                  p = .7,
+                                  list = FALSE,
+                                  times = 1)
+
+# setting train and test sets
+xgb.Train <- xgb.monthly[trainIndex,]
+xgb.Test <- xgb.monthly[-trainIndex,]
+
+#-----------------------------------------------------------------------#
+
+# training the model
+
+# creating sparse matrix for learning
+sparse_matrix_train <- sparse.model.matrix(ARIMA~.-1, data = xgb.Train)
+
+# getting label (outcome), ERP solution dummy vector
+xgb.Train$outputVector <- xgb.Train$ARIMA
+output_train_vector <- xgb.Train[, "outputVector"]
+
+# building model on training data
+bst <- xgboost(data = sparse_matrix_train, label = output_train_vector, max.depth = 10, eta = 1, nthread = 2, nround = 5, 
+               objective = "reg:linear")
+
+#-----------------------------------------------------------------------#
+
+# using model on test set to benchmark accuracy
+
+# saving test label
+test.Label <- xgb.Test$ARIMA
+
+# transforming test to sparse
+sparse_test_matrix <- sparse.model.matrix(ARIMA~.-1, data=xgb.Test)
+
+# getting label (outcome), ERP solution dummy vector from test
+xgb.Test$outputVector <- xgb.Test$ARIMA
+outputTestVector <- xgb.Test[, "outputVector"]
+
+# making prediction on test data
+pred <- predict(bst, sparse_test_matrix)
+
+# set prediction and probabilities as columns 
+prediction <- data.frame(pred)
+
+# add columns to test data
+xgb.test.final <- cbind(xgb.Test, prediction)
+
+# reorder columns
+xgb.test.final <- xgb.test.final[c(2,1,3,4)]
+xgb.test.final$outputVector <- NULL
+
+# add columns
+xgb.test.final$`Squared diff` <- (xgb.test.final$ARIMA - xgb.test.final$pred)^2
+xgb.test.final$`percent error` <- abs((xgb.test.final$pred - xgb.test.final$ARIMA) / xgb.test.final$ARIMA)
+
+
+# plot actuals vs. predictions
+#ggplot(xgb.test.final, aes(x=ARIMA, y=pred)) + geom_point() + ggtitle('Actuals vs. Predictions')
+#with(xgb.test.final, plot(Days, ARIMA, type="l", col="red3", 
+         #    ylab=("Monthly Moving Average")))
+
+#par(new = T)
+#with(xgb.test.final, plot(Days, xgb.test.final$pred, pch=16, axes=F, xlab=NA, ylab=NA, cex=1.2, main = "Actuals vs Predictions"))
+#axis(side = 4)
+#mtext(side = 4, line = 3, 'Number genes selected')
+#legend("topleft",
+     #  legend=c("Actuals", "Predictions"),
+     #  lty=c(1,0), pch=c(NA, 16), col=c("red3", "black"))
+
+# plotting actuals vs predictions
+ggplot(xgb.test.final, aes(Days)) + 
+  geom_line(aes(y = ARIMA, colour = "ARIMA")) + 
+  geom_point(aes(y = pred, colour = "pred")) + ggtitle("Actuals Vs Predictions") + ylab("FTE Requirement")
+```
+
+Being a non-parametric algorithm, the xgboost model returns exceptionally accurate Employee Requirement predictions for the training data. We next test the xgboost model on unobserved future data points, 250, 300, and 350 weekdays from April 1, 2016. 
+
+```{r xgbpred}
+# predicting future FTE Requirement
+
+# days into future
+future.requirement <- data.frame(Days = c(250, 300, 350))
+
+# sparse matrix conversion
+sparse_matrix_pred <- sparse.model.matrix(~.-1, data=future.requirement)
+
+# making prediction
+pred_new_data <- predict(bst, sparse_matrix_pred)
+New.predictions <- data.frame(pred_new_data)
+New.predictions # predictions again converge
+```
+
+Unfortunately, the xgboost model is unable to pick up on the general increasing trend in Emploee Requirement and returns predictions that converge quickly. 
+
+
+## Is the increase in FTE Requirement Statistically Significant? 
+
+We observe a general pattern of increase in Employee Requirement with respect to monthly moving average. We now test whether the increasing pattern is statistically significant. We are looking to determine whether there is statistically significant evidence that the average Employee Requirement has increase. To do this, we split the monthly data into a first and second half, and perform a t-test. 
+
+```{r ttest}
+# statistically significant evidence that FTE Requirement is increasing
+
+# using monthly data
+half.1 <- series.monthly[1:113,]
+half.2 <- series.monthly[115:226,]
+
+# perform t-test
+t.test(half.1$ARIMA, half.2$ARIMA, var.equal=TRUE, paired=FALSE) # evidence that FTE Requirement is in fact increasing
+```
+
+There is evidence at the 1% level of significance that the average FTE Requirement over the first 113 weekdays of the data is not equal to the average FTE Requiremnt over the second 113 weekdays. This is strong evidence that FTE Requirement is increasing over time. 
+
+
+## Step Functions for Prediction
+
+The final method we will cover for predicting future Employee Requirement is to create a custom Step Function.See the graph of the custom step function below: 
+
+```{r viz16}
+# create subsets to train best fit regressions
+piece.1 <- series.monthly[1:67,]
+piece.2 <- series.monthly[68:95,]
+piece.3 <- series.monthly[96:162,]
+piece.4 <- series.monthly[163:190,]
+piece.5 <- series.monthly[191:226,]
+
+# build piecewise regressions
+regression.1 <- lm(ARIMA~Days, data = piece.1)
+regression.2 <- lm(ARIMA~Days, data = piece.2)
+regression.3 <- lm(ARIMA~Days, data = piece.3)
+regression.4 <- lm(ARIMA~Days, data = piece.4)
+regression.5 <- lm(ARIMA~Days, data = piece.5)
+
+# capture fitted values
+piece.fit.1 <- data.frame(regression.1$fitted.values)
+piece.fit.2 <- data.frame(regression.2$fitted.values)
+piece.fit.3 <- data.frame(regression.3$fitted.values)
+piece.fit.4 <- data.frame(regression.4$fitted.values)
+piece.fit.5 <- data.frame(regression.5$fitted.values)
+
+# cbind columns
+PW.1 <- cbind(piece.1, piece.fit.1)
+PW.2 <- cbind(piece.2, piece.fit.2)
+PW.3 <- cbind(piece.3, piece.fit.3)
+PW.4 <- cbind(piece.4, piece.fit.4)
+PW.5 <- cbind(piece.5, piece.fit.5)
+
+# set column names
+setnames(PW.1, old = c("regression.1.fitted.values"), new = c("fit"))
+setnames(PW.2, old = c("regression.2.fitted.values"), new = c("fit"))
+setnames(PW.3, old = c("regression.3.fitted.values"), new = c("fit"))
+setnames(PW.4, old = c("regression.4.fitted.values"), new = c("fit"))
+setnames(PW.5, old = c("regression.5.fitted.values"), new = c("fit"))
+
+# crease final piece wise function
+piece.wise <- rbind(PW.1, PW.2, PW.3, PW.4, PW.5)
+
+
+# plotting actuals vs predictions
+ggplot(piece.wise, aes(Days)) + 
+  geom_point(aes(y = ARIMA, colour = "ARIMA")) + 
+  geom_line(aes(y = fit, colour = "fit")) + ggtitle("Step Function") + ylab("FTE Requirement")
+```
+
+We see that between days 60 and 95 FTE Requirement drops off significnatly. This is during the summer months, and hits a low around July 4th. Similarly, the FTE Requirement drops off significantly around the winter holidays, and increases rapidly from there. Using step functions may allow us to more accurately model future Employee Requirement by taking into account seasonal fluctuations that are always pciked up by forecasting algorithms. 
+
+
+## Summary of Results
+
+This report has highlighted forecasting methods for predcting future Employee Requirement using time series analysis. The most promising results are produced using 'drift' time series, linear models, and step functions. Although non-parametric models are highly efficient in minimizing training error, the low dimensionality of the data, and relatively few data points, hindered their predictive accuracy when looking forward. 
+
+The best course of action for predicting baseline increase in Employee Requirement is to use linear, drift, or step function models. A combination of the three can also be used. When composed with the function for Employee Requirement increase given additional customers, an accurate forecasted result can be expected, allowing the firm to plan for and justify staffing increases with high accuracy. 
+
